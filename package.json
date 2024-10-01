@@ -1,0 +1,15 @@
+{
+  "name": "mail_server",
+  "version": "1.0.0",
+  "description": "In This REPO I am Working ON designing MAIL SERVER IN JAVASCRIPT AND C++",
+  "main": "index.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "author": "",
+  "license": "ISC",
+  "dependencies": {
+    "@types/smtp-server": "^3.5.10",
+    "smtp-server": "^3.13.5"
+  }
+}
