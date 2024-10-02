@@ -1,7 +1,7 @@
 
 #include<cstring>
 
-
+#include <random>
 
 #include <sqlite3.h>
 #include <iostream>
@@ -26,9 +26,9 @@
 using namespace std;
 
 int thread_count = 0; // counts number of logged in users
-vector<mailAccounts>listUser; //stores list of users email
+ //stores list of users email
 sem_t mutex;
-typedef int (*execFunction)(pop3User &user);
+
 
 
 
@@ -49,6 +49,7 @@ struct mailAccounts {
     bool lock;
     string email;
 };
+
 
 extern vector<mailAccounts> listUser;
 class pop3User {
@@ -85,7 +86,7 @@ public:
    
 };
 
-
+typedef int (*execFunction)(pop3User &user);
 // Function to trim leading and trailing whitespaces
 std::string trim(const std::string s) {
     // Find the first character that is not a space from the start
@@ -799,20 +800,39 @@ void store_email_in_db_v2(const std::string& sender, const std::string& recipien
 int ProcessMAIL_FROM(pop3User &user)
 {
    char invalid[] = "Invalid mail";
-   if ( user.clientMessage.substr(0, 10) == "MAIL_FROM") {
-        string sender =  user.clientMessage.substr(10);
-        sender.erase(remove(sender.begin(), sender.end(), '\r'), sender.end());
-        if (user.userEmail != sender) {
-            return user.SendResponse(POP3_DEFAULT_NEGATIVE_RESPONSE, invalid);
+   cout << "ProcessMAIL_FROM: running..." << endl;
 
+   // Log client message
+   cout << "Client message received: " << user.clientMessage << endl;
+
+   if (user.clientMessage.substr(0, 9) == "MAIL_FROM") {
+        string sender = user.clientMessage.substr(10);
+        cout << "Extracted sender: '" << sender << "'" << endl;
+
+        // Remove '\r' if present in the sender
+        sender.erase(remove(sender.begin(), sender.end(), '\r'), sender.end());
+        cout << "Sender after removing carriage return: '" << sender << "'" << endl;
+
+        // Log expected user email
+        cout << "Expected user email: '" << user.userEmail << "'" << endl;
+
+        if (user.userEmail != sender) {
+            cout << "Sender email does not match user email." << endl;
+            return user.SendResponse(POP3_DEFAULT_NEGATIVE_RESPONSE, invalid);
         }
+
         string resp = "User is valid";
+        cout << "User email matches, sending affirmative response." << endl;
         return user.SendResponse(POP3_DEFAULT_AFFERMATIVE_RESPONSE, resp.c_str());
     }
 
+    cout << "MAIL_FROM command not recognized or invalid." << endl;
     return user.SendResponse(POP3_DEFAULT_NEGATIVE_RESPONSE, invalid);
-
 }
+
+
+
+
 bool recipient_exists(const std::string& recipient) {
     sqlite3* db;
     sqlite3_open("mailserver.db", &db);
@@ -830,12 +850,105 @@ bool recipient_exists(const std::string& recipient) {
     return exists;
 }
 
+std::string generate_passkey(int length = 12) {
+    const std::string characters = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
+    std::random_device rd;
+    std::mt19937 generator(rd());
+    std::uniform_int_distribution<> dist(0, characters.size() - 1);
+
+    std::string passkey;
+    for (int i = 0; i < length; ++i) {
+        passkey += characters[dist(generator)];
+    }
+    return passkey;
+}
+bool does_domain_access_exist(sqlite3 *db, const std::string& admin_domain, const std::string& check_domain) {
+    sqlite3_stmt *stmt;
+    const char *sql = "SELECT COUNT(*) FROM domain_acess WHERE domaina = ? AND domain = ?";
+
+    // Prepare the SQL statement
+    if (sqlite3_prepare_v2(db, sql, -1, &stmt, nullptr) != SQLITE_OK) {
+        std::cerr << "Failed to prepare statement: " << sqlite3_errmsg(db) << std::endl;
+        return false;
+    }
+
+    // Bind the admin domain and the check domain values to the SQL statement
+    if (sqlite3_bind_text(stmt, 1, admin_domain.c_str(), -1, SQLITE_STATIC) != SQLITE_OK ||
+        sqlite3_bind_text(stmt, 2, check_domain.c_str(), -1, SQLITE_STATIC) != SQLITE_OK) {
+        std::cerr << "Failed to bind values: " << sqlite3_errmsg(db) << std::endl;
+        sqlite3_finalize(stmt);
+        return false;
+    }
+
+    // Execute the query and check if any matching record exists
+    bool accessExists = false;
+    if (sqlite3_step(stmt) == SQLITE_ROW) {
+        int count = sqlite3_column_int(stmt, 0);
+        accessExists = (count > 0);  // If count > 0, the access exists
+    } else {
+        std::cerr << "Failed to execute query: " << sqlite3_errmsg(db) << std::endl;
+    }
+
+    // Finalize the statement and clean up
+    sqlite3_finalize(stmt);
+    return accessExists;
+}
+bool does_domain_access_exist_email(sqlite3 *db, const std::string& user_email, const std::string& domain) {
+    sqlite3_stmt *stmt;
+    const char *sql = "SELECT COUNT(*) FROM email_acess WHERE email = ? AND domain = ?";
+
+    // Prepare the SQL statement
+    if (sqlite3_prepare_v2(db, sql, -1, &stmt, nullptr) != SQLITE_OK) {
+        std::cerr << "Failed to prepare statement: " << sqlite3_errmsg(db) << std::endl;
+        return false;
+    }
+
+    // Bind the user_email and domain values to the SQL statement
+    if (sqlite3_bind_text(stmt, 1, user_email.c_str(), -1, SQLITE_STATIC) != SQLITE_OK ||
+        sqlite3_bind_text(stmt, 2, domain.c_str(), -1, SQLITE_STATIC) != SQLITE_OK) {
+        std::cerr << "Failed to bind values: " << sqlite3_errmsg(db) << std::endl;
+        sqlite3_finalize(stmt);
+        return false;
+    }
+
+    // Execute the query and check if any matching record exists
+    bool accessExists = false;
+    if (sqlite3_step(stmt) == SQLITE_ROW) {
+        int count = sqlite3_column_int(stmt, 0);
+        accessExists = (count > 0);  // If count > 0, the email-domain pair exists
+    } else {
+        std::cerr << "Failed to execute query: " << sqlite3_errmsg(db) << std::endl;
+    }
+
+    // Finalize the statement and clean up
+    sqlite3_finalize(stmt);
+    return accessExists;
+}
 
 int ProcessRCPT_TO(pop3User &user)
 {
    char invalid[] = "Invalid mail";
  if (user.clientMessage.substr(0, 7) == "RCPT_TO") {
-        user.recipient = user.clientMessage.substr(7);
+
+        string s = user.clientMessage.substr(7);
+        vector<string>t = split(s , '@');
+        vector<string>a = split(user.userEmail , '@');
+        
+        if(t[1]!="example.com")
+        {
+        if(a[1] != t[1] )
+        {
+
+        
+        if (!does_domain_access_exist_email(db, user.userEmail,t[1]) && !does_domain_access_exist(db, a[1], t[1])  ) {
+        std::cerr << "Email-domain pair does not exists in the email_access table." << std::endl;
+         return user.SendResponse(POP3_DEFAULT_NEGATIVE_RESPONSE, invalid);  // Pair already exists
+        }
+         
+        }
+      }
+      
+      user.recipient = user.clientMessage.substr(7);
         user.recipient.erase(remove(user.recipient.begin(), user.recipient.end(), '\r'), user.recipient.end());
         if (!recipient_exists(user.recipient)) {
              return user.SendResponse(POP3_DEFAULT_NEGATIVE_RESPONSE, invalid);
@@ -857,6 +970,472 @@ if (user.clientMessage.substr(0,4) == "DATA") {
      return user.SendResponse(POP3_DEFAULT_NEGATIVE_RESPONSE, invalid);
 
 }
+
+bool is_domain_registered(sqlite3* db, const std::string& domain) {
+    std::string check_sql = "SELECT COUNT(*) FROM admin_panel WHERE domain = '" + domain + "';";
+    sqlite3_stmt* stmt;
+    int count = 0;
+    
+    if (sqlite3_prepare_v2(db, check_sql.c_str(), -1, &stmt, 0) == SQLITE_OK) {
+        if (sqlite3_step(stmt) == SQLITE_ROW) {
+            count = sqlite3_column_int(stmt, 0);
+        }
+    }
+    sqlite3_finalize(stmt);
+    
+    return count > 0;
+}
+
+bool check_domain_register(sqlite3 *db, const std::string& userEmail, const std::string& domain) {
+    sqlite3_stmt *stmt;
+    const char *sql = "SELECT COUNT(*) FROM admin_panel WHERE email = ? AND domain = ?";
+
+    // Prepare the SQL statement
+    if (sqlite3_prepare_v2(db, sql, -1, &stmt, nullptr) != SQLITE_OK) {
+        std::cerr << "Failed to prepare statement: " << sqlite3_errmsg(db) << std::endl;
+        return false;
+    }
+
+    // Bind the email and domain values to the SQL statement
+    if (sqlite3_bind_text(stmt, 1, userEmail.c_str(), -1, SQLITE_STATIC) != SQLITE_OK ||
+        sqlite3_bind_text(stmt, 2, domain.c_str(), -1, SQLITE_STATIC) != SQLITE_OK) {
+        std::cerr << "Failed to bind values: " << sqlite3_errmsg(db) << std::endl;
+        sqlite3_finalize(stmt);
+        return false;
+    }
+
+    // Execute the query and check if a match exists
+    int step = sqlite3_step(stmt);
+    bool isRegistered = false;
+    if (step == SQLITE_ROW) {
+        int count = sqlite3_column_int(stmt, 0);
+        isRegistered = (count > 0);  // Check if any row exists
+    } else {
+        std::cerr << "Failed to execute query: " << sqlite3_errmsg(db) << std::endl;
+    }
+
+    // Clean up
+    sqlite3_finalize(stmt);
+    return isRegistered;
+}
+bool add_domain_access(sqlite3 *db, const std::string& admin_domain, const std::string& given_domain) {
+    sqlite3_stmt *stmt;
+    const char *sql = "INSERT INTO domain_acess (domaina, domain) VALUES (?, ?)";
+
+    // Prepare the SQL statement
+    if (sqlite3_prepare_v2(db, sql, -1, &stmt, nullptr) != SQLITE_OK) {
+        std::cerr << "Failed to prepare statement: " << sqlite3_errmsg(db) << std::endl;
+        return false;
+    }
+
+    // Bind the admin domain and the given domain values to the SQL statement
+    if (sqlite3_bind_text(stmt, 1, admin_domain.c_str(), -1, SQLITE_STATIC) != SQLITE_OK ||
+        sqlite3_bind_text(stmt, 2, given_domain.c_str(), -1, SQLITE_STATIC) != SQLITE_OK) {
+        std::cerr << "Failed to bind values: " << sqlite3_errmsg(db) << std::endl;
+        sqlite3_finalize(stmt);
+        return false;
+    }
+
+    // Execute the statement to insert the domain access record
+    if (sqlite3_step(stmt) != SQLITE_DONE) {
+        std::cerr << "Failed to insert data: " << sqlite3_errmsg(db) << std::endl;
+        sqlite3_finalize(stmt);
+        return false;
+    }
+
+    // Finalize the statement and clean up
+    sqlite3_finalize(stmt);
+    return true;
+}
+
+
+
+
+
+int ProcessADDDOMAINACCESS(pop3User &user) {
+    char invalid[] = "Invalid command";
+    std::cout << user.clientMessage;
+    cout<<"Running...";
+    // Open SQLite database
+    sqlite3* db;
+    int exit = sqlite3_open("mailserver.db", &db);
+    if (exit) {
+        std::cerr << "Error opening database: " << sqlite3_errmsg(db) << std::endl;
+        return user.SendResponse(POP3_DEFAULT_NEGATIVE_RESPONSE, invalid);
+    }
+
+    if (user.clientMessage.substr(0, 15) == "ADDDOMAINACCESS") {
+        // Parse the client message to extract accessing and accessed domains
+        std::vector<std::string> parts = split(user.clientMessage, ':'); // Expected format: ADD_DOMAIN_ACCESS:accessing_domain:accessed_domain
+
+        std::string domain = parts[1];
+        std::string domaina = parts[2];
+  
+       
+
+        // Check if both accessing and accessed domains exist in the admin_panel table
+        if (!check_domain_register(db, user.userEmail,domaina)) {
+            std::cout << "The accessing domain does not exist." << std::endl;
+            sqlite3_close(db);
+            return user.SendResponse(POP3_DEFAULT_NEGATIVE_RESPONSE, "Accessing domain does not exist");
+        }
+        if (!is_domain_registered(db,domain)) {
+            std::cout << "The accessing domain does not exist." << std::endl;
+            sqlite3_close(db);
+            return user.SendResponse(POP3_DEFAULT_NEGATIVE_RESPONSE, "Accessing domain does not exist");
+        }
+        if (does_domain_access_exist(db, domaina, domain)) {
+            std::cout << "The domain access does already exist." << std::endl;
+            sqlite3_close(db);
+            return user.SendResponse(POP3_DEFAULT_NEGATIVE_RESPONSE, "Domain access already exist");
+        }
+
+        // Add the domain access to the domain_access table
+        if(add_domain_access(db, domaina, domain))
+        { sqlite3_close(db);
+        return user.SendResponse(POP3_DEFAULT_AFFERMATIVE_RESPONSE, "Domain access added successfully");
+        }
+        else{
+        sqlite3_close(db);
+        return user.SendResponse(POP3_DEFAULT_NEGATIVE_RESPONSE, invalid);
+        }
+    }
+
+    // If the command is invalid
+    sqlite3_close(db);
+    return user.SendResponse(POP3_DEFAULT_NEGATIVE_RESPONSE, invalid);
+}
+
+void remove_domain_access(sqlite3* db, const std::string& accessing_domain, const std::string& accessed_domain) {
+    std::string delete_sql = "DELETE FROM domain_access WHERE accessing_domain = '" + accessing_domain + "' AND accessed_domain = '" + accessed_domain + "';";
+    char* errMsg = 0;
+    int rc = sqlite3_exec(db, delete_sql.c_str(), 0, 0, &errMsg);
+
+    if (rc != SQLITE_OK) {
+        std::cerr << "SQL error: " << errMsg << std::endl;
+        sqlite3_free(errMsg);
+    } else {
+        std::cout << "Domain access removed successfully: " << accessing_domain << " can no longer access " << accessed_domain << std::endl;
+    }
+}
+
+int ProcessREMOVEDOMAINACCESS(pop3User &user) {
+    char invalid[] = "Invalid command";
+    std::cout << user.clientMessage;
+
+    // Open SQLite database
+    sqlite3* db;
+    int exit = sqlite3_open("mailserver.db", &db);
+    if (exit) {
+        std::cerr << "Error opening database: " << sqlite3_errmsg(db) << std::endl;
+        return user.SendResponse(POP3_DEFAULT_NEGATIVE_RESPONSE, invalid);
+    }
+
+    if (user.clientMessage.substr(0, 18) == "REMOVE_DOMAIN_ACCESS") {
+        // Parse the client message to extract accessing and accessed domains
+        std::vector<std::string> parts = split(user.clientMessage, ':'); // Expected format: REMOVE_DOMAIN_ACCESS:accessing_domain:accessed_domain
+
+        std::string domaina = parts[1];
+        std::string domain = parts[2];
+
+        // Check if the user is an admin for the accessing domain
+        if (!check_domain_register(db, user.userEmail, domaina)) {
+            std::cout << "User is not an admin for the accessing domain." << std::endl;
+            sqlite3_close(db);
+            return user.SendResponse(POP3_DEFAULT_NEGATIVE_RESPONSE, "Not an admin");
+        }
+          if (!is_domain_registered(db,domain)) {
+            std::cout << "The accessing domain does not exist." << std::endl;
+            sqlite3_close(db);
+            return user.SendResponse(POP3_DEFAULT_NEGATIVE_RESPONSE, "Accessing domain does not exist");
+        }
+
+        // Check if the domain access exists in the domain_access table
+        if (!does_domain_access_exist(db, domaina, domain)) {
+            std::cout << "The domain access does not exist." << std::endl;
+            sqlite3_close(db);
+            return user.SendResponse(POP3_DEFAULT_NEGATIVE_RESPONSE, "Domain access does not exist");
+        }
+
+        // Remove the domain access from the domain_access table
+        remove_domain_access(db, domaina, domain);
+
+        sqlite3_close(db);
+        return user.SendResponse(POP3_DEFAULT_AFFERMATIVE_RESPONSE, "Domain access removed successfully");
+    }
+
+    // If the command is invalid
+    sqlite3_close(db);
+    return user.SendResponse(POP3_DEFAULT_NEGATIVE_RESPONSE, invalid);
+}
+void update_passkey(sqlite3* db, const std::string& domain, const std::string& new_passkey) {
+    std::string update_sql = "UPDATE admin_panel SET passkey = '" + new_passkey + "' WHERE domain = '" + domain + "';";
+    char* errMsg = 0;
+    int rc = sqlite3_exec(db, update_sql.c_str(), 0, 0, &errMsg);
+
+    if (rc != SQLITE_OK) {
+        std::cerr << "SQL error: " << errMsg << std::endl;
+        sqlite3_free(errMsg);
+    } else {
+        std::cout << "Passkey updated successfully for domain: " << domain << std::endl;
+    }
+}
+
+int ProcessCHANGEPASSKEY(pop3User &user) {
+    char invalid[] = "Invalid command";
+    std::cout << user.clientMessage;
+
+    // Open SQLite database
+    sqlite3* db;
+    int exit = sqlite3_open("mailserver.db", &db);
+    if (exit) {
+        std::cerr << "Error opening database: " << sqlite3_errmsg(db) << std::endl;
+        return user.SendResponse(POP3_DEFAULT_NEGATIVE_RESPONSE, invalid);
+    }
+
+    if (user.clientMessage.substr(0, 11) == "CHANGEPASS") {
+        // Parse the client message to extract the domain
+        std::vector<std::string> parts = split(user.clientMessage, ':'); // Expected format: CHANGEPASS:domain
+
+        std::string domain = parts[1];
+
+        // Check if the user (who sent the request) is an admin for the domain
+        if (!check_domain_register(db, user.userEmail, domain)) {
+            std::cout << "User is not an admin for this domain." << std::endl;
+            sqlite3_close(db);
+            return user.SendResponse(POP3_DEFAULT_NEGATIVE_RESPONSE, "Not an admin");
+        }
+
+        // Generate a new passkey
+        std::string new_passkey = generate_passkey();
+
+        // Update the passkey in the admin_panel table
+        update_passkey(db, domain, new_passkey);
+
+        sqlite3_close(db);
+        return user.SendResponse(POP3_DEFAULT_AFFERMATIVE_RESPONSE, ("Passkey updated successfully. New Passkey: " + new_passkey).c_str());
+    }
+
+    // If the command is invalid
+    sqlite3_close(db);
+    return user.SendResponse(POP3_DEFAULT_NEGATIVE_RESPONSE, invalid);
+}
+// Function to check if the user email exists in the user table
+bool does_user_exist(sqlite3* db, const std::string& email) {
+    std::string check_sql = "SELECT COUNT(*) FROM user WHERE email = '" + email + "';";
+    sqlite3_stmt* stmt;
+    int count = 0;
+
+    if (sqlite3_prepare_v2(db, check_sql.c_str(), -1, &stmt, 0) == SQLITE_OK) {
+        if (sqlite3_step(stmt) == SQLITE_ROW) {
+            count = sqlite3_column_int(stmt, 0);
+        }
+    }
+    sqlite3_finalize(stmt);
+
+    return count > 0;
+}
+
+
+
+
+bool add_to_domain_access(sqlite3 *db, const std::string& user_email, const std::string& domain) {
+    sqlite3_stmt *stmt;
+    const char *sql = "INSERT INTO email_acess (email, domain) VALUES (?, ?)";
+
+    // Prepare the SQL statement
+    if (sqlite3_prepare_v2(db, sql, -1, &stmt, nullptr) != SQLITE_OK) {
+        std::cerr << "Failed to prepare statement: " << sqlite3_errmsg(db) << std::endl;
+        return false;
+    }
+
+    // Bind the user_email and domain values to the SQL statement
+    if (sqlite3_bind_text(stmt, 1, user_email.c_str(), -1, SQLITE_STATIC) != SQLITE_OK ||
+        sqlite3_bind_text(stmt, 2, domain.c_str(), -1, SQLITE_STATIC) != SQLITE_OK) {
+        std::cerr << "Failed to bind values: " << sqlite3_errmsg(db) << std::endl;
+        sqlite3_finalize(stmt);
+        return false;
+    }
+
+    // Execute the statement to insert the email-domain pair
+    if (sqlite3_step(stmt) != SQLITE_DONE) {
+        std::cerr << "Failed to insert data: " << sqlite3_errmsg(db) << std::endl;
+        sqlite3_finalize(stmt);
+        return false;
+    }
+
+    // Finalize the statement and clean up
+    sqlite3_finalize(stmt);
+    return true;
+}
+
+
+
+int ProcessADDE(pop3User &user) {
+    char invalid[] = "Invalid command";
+    std::cout << user.clientMessage<<endl;
+
+    // Open SQLite database
+    sqlite3* db;
+    int exit = sqlite3_open("mailserver.db", &db);
+    if (exit) {
+        std::cerr << "Error opening database: " << sqlite3_errmsg(db) << std::endl;
+        return user.SendResponse(POP3_DEFAULT_NEGATIVE_RESPONSE, invalid);
+    }
+
+    if (user.clientMessage.substr(0, 4) == "ADDE") {
+        // Parse the client message to extract the domain and email to add
+        std::vector<std::string> parts = split(user.clientMessage, ':'); // Expected format: ADD:domain:user_email
+
+        std::string domain = parts[1];
+        std::string user_to_add_email = parts[2];
+        std::vector<std::string> p = split(parts[2], '@');
+        
+       
+        // Check if the user (who sent the request) is an admin for the domain
+        if (!check_domain_register(db, user.userEmail, domain)) {
+            std::cout << "User is not an admin for this domain." << std::endl;
+            sqlite3_close(db);
+            return user.SendResponse(POP3_DEFAULT_NEGATIVE_RESPONSE, "Not an admin");
+        }
+         if(domain == p[1])
+        {
+          return user.SendResponse(POP3_DEFAULT_NEGATIVE_RESPONSE, "You already have permission");
+        }
+
+        // Check if the email being added exists in the user table
+        if (!does_user_exist(db, user_to_add_email)) {
+            std::cout << "The email does not exist in the user table." << std::endl;
+            sqlite3_close(db);
+            return user.SendResponse(POP3_DEFAULT_NEGATIVE_RESPONSE, "Email does not exist");
+        }
+
+        // Check if the email-domain pair already exists in domain_access table
+        if (does_domain_access_exist_email(db, user_to_add_email, domain)) {
+            std::cout << "The email is already associated with this domain." << std::endl;
+            sqlite3_close(db);
+            return user.SendResponse(POP3_DEFAULT_NEGATIVE_RESPONSE, "Email already associated with domain");
+        }
+
+        // Add the email to domain_access table
+        add_to_domain_access(db, user_to_add_email, domain);
+
+        sqlite3_close(db);
+        return user.SendResponse(POP3_DEFAULT_AFFERMATIVE_RESPONSE, "Email added successfully");
+    }
+
+    // If the command is invalid
+    sqlite3_close(db);
+    return user.SendResponse(POP3_DEFAULT_NEGATIVE_RESPONSE, invalid);
+}
+
+
+bool remove_from_domain_access(sqlite3 *db, const std::string& user_email, const std::string& domain) {
+    sqlite3_stmt *stmt;
+    const char *sql = "DELETE FROM email_access WHERE email = ? AND domain = ?";
+
+    // Prepare the SQL statement
+    if (sqlite3_prepare_v2(db, sql, -1, &stmt, nullptr) != SQLITE_OK) {
+        std::cerr << "Failed to prepare statement: " << sqlite3_errmsg(db) << std::endl;
+        return false;
+    }
+
+    // Bind the user_email and domain values to the SQL statement
+    if (sqlite3_bind_text(stmt, 1, user_email.c_str(), -1, SQLITE_STATIC) != SQLITE_OK ||
+        sqlite3_bind_text(stmt, 2, domain.c_str(), -1, SQLITE_STATIC) != SQLITE_OK) {
+        std::cerr << "Failed to bind values: " << sqlite3_errmsg(db) << std::endl;
+        sqlite3_finalize(stmt);
+        return false;
+    }
+
+    // Execute the statement to delete the email-domain pair
+    if (sqlite3_step(stmt) != SQLITE_DONE) {
+        std::cerr << "Failed to delete data: " << sqlite3_errmsg(db) << std::endl;
+        sqlite3_finalize(stmt);
+        return false;
+    }
+
+    // Finalize the statement and clean up
+    sqlite3_finalize(stmt);
+    return true;
+}
+
+
+
+
+
+
+
+
+
+
+
+int ProcessREMOVEE(pop3User &user) {
+    char invalid[] = "Invalid command";
+    std::cout << user.clientMessage;
+
+    // Open SQLite database
+    sqlite3* db;
+    int exit = sqlite3_open("mailserver.db", &db);
+    if (exit) {
+        std::cerr << "Error opening database: " << sqlite3_errmsg(db) << std::endl;
+        return user.SendResponse(POP3_DEFAULT_NEGATIVE_RESPONSE, invalid);
+    }
+
+    if (user.clientMessage.substr(0, 6) == "REMOVE") {
+        // Parse the client message to extract the domain and email to remove
+        std::vector<std::string> parts = split(user.clientMessage, ':'); // Expected format: REMOVE:domain:user_email
+
+        std::string domain = parts[1];
+        std::string user_to_remove_email = parts[2];
+
+        // Check if the user (who sent the request) is an admin for the domain
+        if (!check_domain_register(db, user.userEmail, domain)) {
+            std::cout << "User is not an admin for this domain." << std::endl;
+            sqlite3_close(db);
+            return user.SendResponse(POP3_DEFAULT_NEGATIVE_RESPONSE, "Not an admin");
+        }
+
+        // Check if the email to be removed exists in the user table
+        if (!does_user_exist(db, user_to_remove_email)) {
+            std::cout << "The email does not exist in the user table." << std::endl;
+            sqlite3_close(db);
+            return user.SendResponse(POP3_DEFAULT_NEGATIVE_RESPONSE, "Email does not exist");
+        }
+
+        
+      // Check if the email-domain pair already exists in domain_access table
+        if (does_domain_access_exist_email(db, user_to_remove_email, domain)) {
+            std::cout << "The email is already associated with this domain." << std::endl;
+            sqlite3_close(db);
+            return user.SendResponse(POP3_DEFAULT_NEGATIVE_RESPONSE, "Email already associated with domain");
+        }
+
+
+        // Remove the email from domain_access table
+        if(remove_from_domain_access(db, user_to_remove_email, domain))
+        {
+        sqlite3_close(db);
+        return user.SendResponse(POP3_DEFAULT_AFFERMATIVE_RESPONSE, "Email removed successfully");
+       }
+       else
+       {
+        sqlite3_close(db);
+        return user.SendResponse(POP3_DEFAULT_NEGATIVE_RESPONSE, "Email not removed");
+       }
+    }
+
+    // If the command is invalid
+    sqlite3_close(db);
+    return user.SendResponse(POP3_DEFAULT_NEGATIVE_RESPONSE, invalid);
+}
+
+
+
+
+
+
+
 int reportEmail(std::string user_email, std::string reported_email) {
     sqlite3 *db;
     sqlite3_stmt *stmt;
@@ -1052,28 +1631,274 @@ int ProcessREPORT(pop3User &user)
     return user.SendResponse(POP3_DEFAULT_NEGATIVE_RESPONSE, invalid);
 
 }
+
+
 // List of functions used to process the pop3 commands from the client
+
+void register_domain(sqlite3* db, const std::string& email, const std::string& domain, const std::string& passkey) {
+    std::string insert_sql = "INSERT INTO admin_panel (email, domain, passkey) VALUES ('" + email + "', '" + domain + "', '" + passkey + "');";
+    char* errMsg = 0;
+    int rc = sqlite3_exec(db, insert_sql.c_str(), 0, 0, &errMsg);
+
+    if (rc != SQLITE_OK) {
+        std::cerr << "SQL error: " << errMsg << std::endl;
+        sqlite3_free(errMsg);
+    } else {
+        std::cout << "Domain registered successfully!" << std::endl;
+    }
+}
+
+int ProcessREGISTER(pop3User &user)
+{
+    char invalid[] = "Invalid command";
+    std::cout << user.clientMessage;
+    
+    
+
+    // Open SQLite database
+    sqlite3* db;
+    int exit = sqlite3_open("mailserver.db", &db);
+    if (exit) {
+        std::cerr << "Error opening database: " << sqlite3_errmsg(db) << std::endl;
+        return user.SendResponse(POP3_DEFAULT_NEGATIVE_RESPONSE, invalid);
+    }
+
+    
+    if (user.clientMessage.substr(0, 8) == "REGISTER") {
+        // Split the client message by ':'
+        std::vector<std::string> parts = split(user.clientMessage, ':');
+        if(parts[1]=="example.com"){
+         std::cout << "Domain is example.com " << parts[1] << std::endl;
+            return user.SendResponse(POP3_DEFAULT_NEGATIVE_RESPONSE, "Domain already registered");
+        }
+        // Check if domain already exists in the database
+        if (is_domain_registered(db, parts[1])) {
+            std::cout << "Domain already registered: " << parts[1] << std::endl;
+            return user.SendResponse(POP3_DEFAULT_NEGATIVE_RESPONSE, "Domain already registered");
+        }
+
+        // Generate passkey for new domain
+        std::string passkey = generate_passkey();
+        
+        // Register domain by inserting it into the admin panel table
+        register_domain(db, user.userEmail, parts[1], passkey);
+
+        // Close database connection
+        sqlite3_close(db);
+
+        // Send response with generated passkey
+        return user.SendResponse(POP3_DEFAULT_AFFERMATIVE_RESPONSE, passkey.c_str());
+    }
+
+    // If not a valid command, send negative response
+    sqlite3_close(db);
+    return user.SendResponse(POP3_DEFAULT_NEGATIVE_RESPONSE, invalid);
+}
+
+
+
+
+std::string trim4(const std::string& str) {
+    std::string result = str;
+    // Remove leading and trailing whitespace
+    result.erase(result.begin(), std::find_if(result.begin(), result.end(), [](unsigned char ch) {
+        return !std::isspace(ch);
+    }));
+    result.erase(std::find_if(result.rbegin(), result.rend(), [](unsigned char ch) {
+        return !std::isspace(ch);
+    }).base(), result.end());
+    return result;
+}
+
+bool does_domain_exist_p(sqlite3 *db, const std::string& domain, const std::string& passkey) {
+    if (db == nullptr) {
+        std::cerr << "Database connection is not open." << std::endl;
+        return false;
+    }
+
+    sqlite3_stmt *stmt;
+    const char *sql = "SELECT COUNT(*) FROM admin_panel WHERE domain = ? AND passkey = ? COLLATE NOCASE";
+
+    std::string trimmed_domain = trim4(domain);
+    std::string trimmed_passkey = trim4(passkey);
+
+    std::cout << "Preparing to check if domain exists with the following details:" << std::endl;
+    std::cout << "Domain: '" << trimmed_domain << "' (Length: " << trimmed_domain.length() << ")" << std::endl;
+    std::cout << "Passkey: '" << trimmed_passkey << "' (Length: " << trimmed_passkey.length() << ")" << std::endl;
+
+    if (sqlite3_prepare_v2(db, sql, -1, &stmt, nullptr) != SQLITE_OK) {
+        std::cerr << "Failed to prepare statement: " << sqlite3_errmsg(db) << std::endl;
+        return false;
+    }
+
+    if (sqlite3_bind_text(stmt, 1, trimmed_domain.c_str(), -1, SQLITE_STATIC) != SQLITE_OK) {
+        std::cerr << "Failed to bind domain: " << sqlite3_errmsg(db) << std::endl;
+        sqlite3_finalize(stmt);
+        return false;
+    }
+
+    if (sqlite3_bind_text(stmt, 2, trimmed_passkey.c_str(), -1, SQLITE_STATIC) != SQLITE_OK) {
+        std::cerr << "Failed to bind passkey: " << sqlite3_errmsg(db) << std::endl;
+        sqlite3_finalize(stmt);
+        return false;
+    }
+
+    bool exists = false;
+    int step_result = sqlite3_step(stmt);
+    if (step_result == SQLITE_ROW) {
+        int count = sqlite3_column_int(stmt, 0);
+        std::cout << "Count result: " << count << std::endl;
+        exists = (count > 0);
+        std::cout << "Domain existence check: " << (exists ? "Exists" : "Does not exist") << std::endl;
+    } else if (step_result == SQLITE_DONE) {
+        std::cout << "SQL execution completed with no rows." << std::endl;
+    } else {
+        std::cerr << "Failed to step through results: " << sqlite3_errmsg(db) << std::endl;
+    }
+
+    if (sqlite3_finalize(stmt) != SQLITE_OK) {
+        std::cerr << "Failed to finalize statement: " << sqlite3_errmsg(db) << std::endl;
+    }
+
+    return exists;
+}
+
+int ProcessGETACCESS( pop3User &user) {
+    // Extract domain and passkey from user.clientmessage
+    
+    char invalid[] = "invalid command";
+    sqlite3 *db;
+     int exit = sqlite3_open("mailserver.db", &db);
+    if (exit) {
+        std::cerr << "Error opening database: " << sqlite3_errmsg(db) << std::endl;
+        return user.SendResponse(POP3_DEFAULT_NEGATIVE_RESPONSE, invalid);
+    }
+    std::string domain, passkey;
+    
+    // Assuming the clientmessage format is "passkey:domain", split the string
+    
+    vector<string>t = split(user.clientMessage, ':');
+
+    passkey = t[1];
+    domain = t[2];
+
+    // Check if domain exists in the admin_panel table with the given passkey
+    if (!does_domain_exist_p(db, domain, passkey)) {
+        std::cerr << "Domain or passkey does not exist in the admin panel." << std::endl;
+         return user.SendResponse(POP3_DEFAULT_NEGATIVE_RESPONSE, invalid);  // Domain or passkey is invalid
+    }
+
+    // Check if the email-domain pair already exists in the email_access table
+    if (!does_domain_access_exist_email(db, user.userEmail, domain)) {
+        std::cerr << "Email-domain pair already exists in the email_access table." << std::endl;
+         return user.SendResponse(POP3_DEFAULT_NEGATIVE_RESPONSE, invalid);  // Pair already exists
+    }
+
+    // Add the email-domain pair to the email_access table
+    if (!add_to_domain_access(db, user.userEmail, domain)) {
+        std::cerr << "Failed to add email-domain pair to the email_access table." << std::endl;
+         return user.SendResponse(POP3_DEFAULT_NEGATIVE_RESPONSE, invalid);  // Failed to add
+    }
+
+    std::cout << "Access granted and added to the email_access table for domain: " << domain << std::endl;
+     return user.SendResponse(POP3_DEFAULT_AFFERMATIVE_RESPONSE, "Access granted and added to the email_access table for domain:");  // Successfully processed
+}
+
+
+int ProcessNOOP( pop3User &user)
+{
+return user.SendResponse(POP3_DEFAULT_NEGATIVE_RESPONSE, "eewpe");
+}
+
+
+string signup_p(string a , string b , string c)
+{
+   char invalid[] = "invalid command";
+   cout<<"running..."<<endl;
+   string passkey = c;
+  std::vector<std::string> t = split(a, '@');
+   string domain = t[1];
+   sqlite3 *db;  
+   
+    int rc = sqlite3_open("mailserver.db", &db);
+    if (rc != SQLITE_OK) {
+        std::cerr << "Cannot open database: " << sqlite3_errmsg(db) << std::endl;
+        if (db) sqlite3_close(db);
+        return "Database is not opened";
+    }
+   
+   
+  if (!does_domain_exist_p(db, domain, passkey)) {
+        std::cerr << "Domain or passkey does not exist in the admin panel." << std::endl;
+         return "Domain or passkey does not exist in the admin panel.";  // Domain or passkey is invalid
+    }
+    
+    string password = b;
+    string username = a;
+    
+    std::string hashed_password = password;
+
+     
+
+    // Prepare SQL statement for inserting user
+    const char* sql = "INSERT INTO user (email, password) VALUES (?, ?);";
+    sqlite3_stmt* stmt;
+
+    rc = sqlite3_prepare_v2(db, sql, -1, &stmt, nullptr);
+    if (rc != SQLITE_OK) {
+        std::cerr << "Failed to prepare statement: " << sqlite3_errmsg(db) << std::endl;
+        sqlite3_close(db);
+        return "Database error.";
+    }
+
+    // Bind parameters
+    sqlite3_bind_text(stmt, 1, username.c_str(), -1, SQLITE_STATIC);
+    sqlite3_bind_text(stmt, 2, hashed_password.c_str(), -1, SQLITE_STATIC);
+
+    // Execute the statement
+    rc = sqlite3_step(stmt);
+    if (rc != SQLITE_DONE) {
+        std::cerr << "Error executing statement: " << sqlite3_errmsg(db) << std::endl;
+        sqlite3_finalize(stmt);
+        sqlite3_close(db);
+        return "Signup failed. Username may already exist.";
+    }
+
+    // Clean up
+    sqlite3_finalize(stmt);
+    sqlite3_close(db);
+
+    return "Signup successful!";
+    
+
+
+}
+
+
+ string email_data_ = "";
+
 execFunction funcArray[] = {
     ProcessUSER, ProcessPASS, ProcessQUIT, ProcessSTAT, ProcessLIST,
-    ProcessRETR, ProcessDELE, ProcessLAST, ProcessRSET, ProcessTOP , ProcessMAIL_FROM ,ProcessRCPT_TO , ProcessDATA , ProcessREPORT
+    ProcessRETR, ProcessDELE,   ProcessNOOP ,ProcessLAST, ProcessRSET, ProcessTOP , ProcessMAIL_FROM ,ProcessRCPT_TO , ProcessDATA , ProcessREPORT
+,ProcessREGISTER , ProcessGETACCESS , ProcessADDDOMAINACCESS , ProcessREMOVEDOMAINACCESS , 
+ProcessCHANGEPASSKEY , ProcessADDE , ProcessREMOVEE
 };
 
 string commands[] = {
-    "USER", "PASS", "QUIT", "STAT", "LIST", "RETR", "DELE", "NOOP", "LAST", "RSET", "TOP" 
-    ,"MAIL_FROM"  , "RCPT_TO" , "DATA" , "REPORT"
-};
-
+    "USER", "PASS", "QUIT", "STAT", "LIST", "RETR", "DELE", "NOOP", "LAST", "RSET", "TOP" ,"MAIL_FROM"  , "RCPT_TO" , "DATA" , "REPORT" ,"REGISTER" ,"GETACCESS" , "ADDDOMAINACCESS" ,     
+     "REMOVEDOMAINACCESS" , "CHANGEPASSKEY" , "ADDE" , "REMOVEE"};
 int ProcessCMD(pop3User &User, char *clientMessage)
 {
     string message = clientMessage;
     string crlf = "\r\n";  // Correct CRLF
     char resp[] = "Invalid Command";
-    string email_data_ = "";
+   
      if (User.expecting_data_) {
         // Continue capturing email content until "\r\n.\r\n"
         if (message.substr(0,1) == ".") {
             store_email_in_db_v2(User.userEmail, User.recipient, email_data_);
             User.expecting_data_ = false;
+            User.recipient = "";
             email_data_.clear();
              string resp = "Data Stored";
             return User.SendResponse(POP3_DEFAULT_AFFERMATIVE_RESPONSE, resp.c_str());
@@ -1085,7 +1910,27 @@ int ProcessCMD(pop3User &User, char *clientMessage)
     }
 
     cout << "Received message: " << message << endl;
-    if(message.substr(0, 4) == "SIGN" && User.state == POP3_STATE_AUTHORIZATION)
+    
+     if(message.substr(0, 6) == "SIGN_P" && User.state == POP3_STATE_AUTHORIZATION)
+    {
+      std::vector<std::string> parts = split(message, '-');
+      cout<<parts[1]<<endl;
+      cout<<parts[2]<<endl;
+      cout<<parts[3]<<endl;
+      string a  = parts[1];
+      string b = parts[2];
+      string c = parts[3];
+      if(signup_p(a,b,c) == "Signup successful!")
+      {
+       string resp =  "250 Hello" + parts[1];
+       return User.SendResponse(POP3_DEFAULT_AFFERMATIVE_RESPONSE, resp.c_str()); 
+        cout<<"here2";
+      } 
+      cout<<"here";
+      return User.SendResponse(POP3_DEFAULT_NEGATIVE_RESPONSE, "singup not successful!");
+    }
+    
+    else if(message.substr(0, 4) == "SIGN" && User.state == POP3_STATE_AUTHORIZATION)
     {
       std::vector<std::string> parts = split(message, '-');
       cout<<parts[1]<<endl;
@@ -1101,6 +1946,10 @@ int ProcessCMD(pop3User &User, char *clientMessage)
       
       return User.SendResponse(POP3_DEFAULT_NEGATIVE_RESPONSE, "singup not successful!");
     }
+    
+    
+    
+    
    
     
     
@@ -1113,7 +1962,7 @@ int ProcessCMD(pop3User &User, char *clientMessage)
             }
 
             message = skipWhitespace(message);
-            cout<<funcArray[i]<<endl;
+            cout<<"all"<<funcArray[i]<<endl;
             User.clientMessage = message;
              if (i>1 && User.state == POP3_STATE_AUTHORIZATION) {
                 return User.SendResponse(POP3_DEFAULT_NEGATIVE_RESPONSE, "USER and PASS commands  required first");
