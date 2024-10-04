@@ -28,7 +28,8 @@ using namespace std;
 int thread_count = 0; // counts number of logged in users
  //stores list of users email
 sem_t mutex;
-
+   
+    namespace fs = std::filesystem;
 
 
 
@@ -59,6 +60,7 @@ public:
     bool checked;
      vector<mail> emails;
     bool expecting_data_ = false;
+    bool recieving_attach = false;
     unsigned int index;
     unsigned int m_nLastMsg;
     unsigned int clientSocket;
@@ -1875,13 +1877,171 @@ string signup_p(string a , string b , string c)
 }
 
 
+
+
+// Store file path in database
+bool store_email_in_db(const std::string& sender, const std::string& recipient, const std::string& file_path) {
+    sqlite3* db;
+    int rc = sqlite3_open("mailserver.db", &db);
+    if (rc != SQLITE_OK) {
+        std::cerr << "Cannot open database: " << sqlite3_errmsg(db) << std::endl;
+        if (db) sqlite3_close(db);
+        return false;
+    }
+
+    sqlite3_stmt* stmt;
+    const char* sql = "INSERT INTO emails (sender, recipient, data) VALUES (?, ?, ?)";
+
+    if (sqlite3_prepare_v2(db, sql, -1, &stmt, nullptr) != SQLITE_OK) {
+        std::cerr << "Failed to prepare statement: " << sqlite3_errmsg(db) << std::endl;
+        return false;
+    }
+
+    sqlite3_bind_text(stmt, 1, sender.c_str(), -1, SQLITE_STATIC);
+    sqlite3_bind_text(stmt, 2, recipient.c_str(), -1, SQLITE_STATIC);
+    sqlite3_bind_text(stmt, 3, file_path.c_str(), -1, SQLITE_STATIC);
+
+    if (sqlite3_step(stmt) != SQLITE_DONE) {
+        std::cerr << "Failed to insert into emails table: " << sqlite3_errmsg(db) << std::endl;
+        sqlite3_finalize(stmt);
+        return false;
+    }
+
+    sqlite3_finalize(stmt);
+    return true;
+}
+
+// Process SENDATTACHMENT command
+// int ProcessSENDATTACHMENT(pop3User &user) {
+//     try {
+//         std::string client_msg = user.clientMessage.substr(14);
+//         size_t first_colon_pos = client_msg.find(':');
+//         if (first_colon_pos == std::string::npos) {
+//             return user.SendResponse(POP3_DEFAULT_NEGATIVE_RESPONSE, "Invalid message format");
+//         }
+
+//         std::string file_name = client_msg.substr(0, first_colon_pos);
+//         std::string file_content = client_msg.substr(first_colon_pos + 1);
+
+//         // Store the file on the server's storage (file_name can be changed to a random one)
+//         if (!store_attachment(file_content, file_name)) {
+//             return user.SendResponse(POP3_DEFAULT_NEGATIVE_RESPONSE, "Failed to store file");
+//         }
+
+//         // Store the file path in the database
+//         std::string storage_path = "store/" + file_name;
+//         if (!store_email_in_db(user.userEmail, user.recipient, storage_path)) {
+//             return user.SendResponse(POP3_DEFAULT_NEGATIVE_RESPONSE, "Failed to store file path in DB");
+//         }
+
+//         // Respond positively if everything succeeds
+//         return user.SendResponse(POP3_DEFAULT_AFFERMATIVE_RESPONSE, "Attachment stored successfully");
+
+//     } catch (const std::exception& e) {
+//         std::cerr << "Error in ProcessSENDATTACHMENT: " << e.what() << std::endl;
+//         return user.SendResponse(POP3_DEFAULT_NEGATIVE_RESPONSE, "Error processing attachment");
+//     }
+// }
+
+
+std::string base64_decode(const std::string& encoded_data) {
+    static const std::string base64_chars = 
+                 "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+                 "abcdefghijklmnopqrstuvwxyz"
+                 "0123456789+/";
+                 
+    std::vector<int> base64_table(256, -1);
+    for (int i = 0; i < 64; ++i) {
+        base64_table[base64_chars[i]] = i;
+    }
+
+    std::string decoded_data;
+    int val = 0, valb = -8;
+    for (unsigned char c : encoded_data) {
+        if (base64_table[c] == -1) break;
+        val = (val << 6) + base64_table[c];
+        valb += 6;
+        if (valb >= 0) {
+            decoded_data.push_back(char((val >> valb) & 0xFF));
+            valb -= 8;
+        }
+    }
+    return decoded_data;
+}
+
+// Function to generate a unique file name on the server
+std::string generate_unique_filename(const std::string& original_filename) {
+ 
+    
+    std::string extension = fs::path(original_filename).extension().string();
+    std::string basename = fs::path(original_filename).stem().string();
+    
+    // Get current timestamp
+    std::time_t now = std::time(nullptr);
+    
+    // Generate a new file name by appending the timestamp
+    std::string new_filename = basename + "_" + std::to_string(now) + extension;
+    
+    return new_filename;
+}
+
+// Function to create a new file with the same MIME type
+std::string create_file_with_same_mime_type(const std::string& original_filename) {
+    // Generate a unique filename with the same extension
+    std::string new_filename = generate_unique_filename(original_filename);
+
+    // Define the directory where the file will be stored (make sure the 'store' directory exists)
+    std::string storage_directory = "store/";
+    
+    if (!fs::exists(storage_directory)) {
+        fs::create_directory(storage_directory);  // Create directory if it doesn't exist
+    }
+
+    // Return the full path where the new file will be created
+    return storage_directory + new_filename;
+}
+string new_file_path = "";
+
+// Function to write the content to the created file
+void write_content_to_file(const std::string& file_path, const std::string& file_content) {
+    std::ofstream output_file(file_path, std::ios::binary);
+    if (!output_file) {
+        std::cerr << "Error: Unable to create file: " << file_path << std::endl;
+        return;
+    }
+
+    // Write the decoded content to the file
+    output_file.write(file_content.c_str(), file_content.size());
+    output_file.close();
+    
+    std::cout << "File successfully saved as: " << file_path << std::endl;
+}
+
+
+void process_attachment_command(const std::string& command) {
+    // Extract the filename and base64 encoded content from the command
+    
+    std::vector<std::string> parts = split(command, ':');
+    if (parts.size() < 3) {
+        std::cerr << "Invalid attachment format" << std::endl;
+        return;
+    }
+    string filename = parts[1] ;
+    
+    // Decode the Base64-encoded content
+    
+
+    // Create a file with the same MIME type and get the full path
+     new_file_path = create_file_with_same_mime_type(filename);
+}
  string email_data_ = "";
+ string recieve = "";
 
 execFunction funcArray[] = {
     ProcessUSER, ProcessPASS, ProcessQUIT, ProcessSTAT, ProcessLIST,
     ProcessRETR, ProcessDELE,   ProcessNOOP ,ProcessLAST, ProcessRSET, ProcessTOP , ProcessMAIL_FROM ,ProcessRCPT_TO , ProcessDATA , ProcessREPORT
 ,ProcessREGISTER , ProcessGETACCESS , ProcessADDDOMAINACCESS , ProcessREMOVEDOMAINACCESS , 
-ProcessCHANGEPASSKEY , ProcessADDE , ProcessREMOVEE
+ProcessCHANGEPASSKEY , ProcessADDE , ProcessREMOVEE 
 };
 
 string commands[] = {
@@ -1909,6 +2069,36 @@ int ProcessCMD(pop3User &User, char *clientMessage)
         }
     }
 
+ if (User.recieving_attach) {
+        // Continue capturing email content until "\r\n.\r\n"
+        if (message.substr(0,3) == "EOF") {
+            
+            write_content_to_file(new_file_path, recieve);
+            store_email_in_db(User.userEmail, User.recipient, new_file_path);
+            } else {
+            recieve += message + "\r\n";  // Collect email data
+            string resp = "250 ok";
+        return User.SendResponse(POP3_DEFAULT_AFFERMATIVE_RESPONSE, resp.c_str());  // No response until data collection is done
+        }
+    }
+
+    if (message.substr(0, 14) == "SENDATTACHMENT") {
+    // Handle the SENDATTACHMENT logic separately, as it involves additional data
+    // Extract the file name and the encoded content
+    std::vector<std::string> parts = split(message, ':');
+    if (parts.size() >= 3) {
+        std::string filename = parts[1];
+       
+        User.clientMessage = message;
+        User.recieving_attach = true;
+        cout<<message;
+        process_attachment_command(message);
+              // Process the attachment
+        return User.SendResponse(POP3_DEFAULT_AFFERMATIVE_RESPONSE, "Send attachment data");
+    } else {
+        return User.SendResponse(POP3_DEFAULT_NEGATIVE_RESPONSE, "Invalid attachment format");
+    }
+}
     cout << "Received message: " << message << endl;
     
      if(message.substr(0, 6) == "SIGN_P" && User.state == POP3_STATE_AUTHORIZATION)
